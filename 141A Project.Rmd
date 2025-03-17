@@ -1,0 +1,697 @@
+---
+title: "STA141A Project"
+author: "Caitlyn Anne Nunez"
+date: "2025-03-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(caret)
+```
+
+```{r}
+#setting working directory and reading sessions
+setwd("/Users/caitlynnunez/Desktop/sta141a project")
+
+session = list()
+overview = data.frame(mouse_name = character(), date_exp = character())
+
+for(i in 1:18){
+  session[[i]] = readRDS(paste("session", i, '.rds', sep=''))
+  
+  
+  overview = rbind(overview, data.frame(mouse_name = session[[i]]$mouse_name, date_exp = session[[i]]$date_exp))
+}
+
+```
+
+
+# Abstract
+
+In this project, the goal is to build a predictive model that can forecast the feedback type of each trial based on neural activity data and the visual stimuli presented to the mice. By analyzing how neural firing patterns relate to the stimuli, the model aims to predict whether the mice will receive a reward or penalty for each decision made during the experiment.
+
+# Introduction
+
+Using 18 sessions from a study done by Steinmetz et al. (2019), we will observe neuron activity in the mice's visual cortex. The mice made decisions based on visual stimuli with different contrasts, and their choices were rewarded or penalized. The sessions we will be using are from four mice: Lederberg, Frossman, Hence, and Cori. We will analyze the spike train data from these sessions to understand how visual stimuli affect neural firing during decision-making.
+
+# Exploratory Analysis
+
+In this part, I will be exploring the different variables across all of the sessions. By doing so, I can familiarize myself with the data and seeing what variables were in each session. By exploring the data, we can also determine the most notable variables, which will help us answer our overall question and help us build the predictive model. 
+
+```{r, echo=TRUE, results='hide'}
+#function to process the session data
+process_session_data <- function(session_data) {
+  session_summary <- list()
+
+  for (i in 1:length(session_data)) {
+    session <- session_data[[i]]
+    
+    
+    feedback_type <- rep(session$feedback_type[1], length(session$spks))  
+    
+    trial_summary <- tibble(
+      session_number = i,
+      feedback_type = feedback_type,  
+      contrast_left = session$contrast_left,  
+      contrast_right = session$contrast_right,  
+      time = session$time,  
+      spks = session$spks,  
+      brain_area = session$brain_area  
+    )
+    
+    trial_summary <- trial_summary %>%
+      mutate(
+        total_spks = sum(spks, na.rm = TRUE),
+        mean_spks = mean(spks, na.rm = TRUE),
+        min_spks = min(spks, na.rm = TRUE),
+        max_spks = max(spks, na.rm = TRUE),
+        mean_contrast_left = mean(contrast_left, na.rm = TRUE),
+        mean_contrast_right = mean(contrast_right, na.rm = TRUE)
+      )
+    
+    session_summary[[i]] <- trial_summary
+  }
+  
+  session_all <- bind_rows(session_summary)
+
+  return(session_all)
+}
+
+```
+
+
+```{r, echo=TRUE, results='hide'}
+#observing feedback types and counts across all sessions
+feedback_summary <- lapply(session, function(x) table(x$feedback_type))
+print(feedback_summary)
+
+feedback_df <- data.frame(
+  Session = rep(1:18, each = 2),
+  Feedback_Type = rep(c("Success", "Failure"), times = 18),
+  Count = unlist(lapply(feedback_summary, function(x) c(x["1"], x["-1"])))
+)
+
+print(feedback_df)
+```
+
+
+```{r, echo=TRUE, results='hide'}
+#observe all the successes and failures of each trial and a count of each
+feedback_summary <- lapply(session, function(x) table(x$feedback_type))
+print(feedback_summary)
+
+feedback_df <- data.frame(
+  Session = rep(1:18, each = 2),
+  Feedback_Type = rep(c("Success", "Failure"), times = 18),
+  Count = unlist(lapply(feedback_summary, function(x) c(x["1"], x["-1"])))
+)
+
+print(feedback_df)
+```
+
+```{r, echo=TRUE, results='hide'}
+#observe the contrast values for left and right stimuli
+contrast_summary_left <- sapply(session, function(x) summary(x$contrast_left))
+contrast_summary_right <- sapply(session, function(x) summary(x$contrast_right))
+
+print(contrast_summary_left)
+print(contrast_summary_right)
+
+#calculate the mean contrasts for each session
+mean_contrast_left <- sapply(session, function(x) mean(x$contrast_left, na.rm = TRUE))
+mean_contrast_right <- sapply(session, function(x) mean(x$contrast_right, na.rm = TRUE))
+
+
+contrast_summary_table <- data.frame(
+  Session = 1:18,
+  Mean_Contrast_Left = mean_contrast_left,
+  Mean_Contrast_Right = mean_contrast_right
+)
+
+print(contrast_summary_table)
+```
+
+```{r, echo=TRUE, results='hide'}
+#calculate most important values of spikes per session and create a table for simplicity and readability
+total_spks_per_session <- sapply(session, function(x) sum(unlist(x$spks), na.rm = TRUE))
+
+
+mean_spks_per_session <- sapply(session, function(x) mean(unlist(x$spks), na.rm = TRUE))
+
+
+min_spks_per_session <- sapply(session, function(x) min(unlist(x$spks), na.rm = TRUE))
+max_spks_per_session <- sapply(session, function(x) max(unlist(x$spks), na.rm = TRUE))
+
+
+spks_summary_table <- data.frame(
+  Session = 1:18,
+  Total_Spks = total_spks_per_session,
+  Mean_Spks = mean_spks_per_session,
+  Min_Spks = min_spks_per_session,
+  Max_Spks = max_spks_per_session
+)
+
+print(spks_summary_table)
+
+```
+
+Calculating the total spikes and mean spikes per sessions help visualize how each session went, especially with the minimum and maximum number of spikes as well. It leaves us with quick, yet insightful, information of each in order to compare data across sessions, seeing any patterns of neural firing activity. From the table above, we can see that Session 13 had the highest mean number of spikes at 0.06. However, all of the sessions have very different means, which may point to high variability and no specific pattern. Next, we will visualize some of these findings to make it easier to understand the homogeneity and heterogeneity of the sessions. 
+
+```{r}
+#create a list to store the brain areas for each session
+brain_area_summary <- list()
+
+
+for (i in 1:18) {
+  
+  brain_area_summary[[i]] <- unique(session[[i]]$brain_area)
+}
+
+brain_area_df <- data.frame(
+  session_number = 1:18,
+  brain_areas = sapply(brain_area_summary, function(x) paste(x, collapse = ", "))
+)
+
+print(brain_area_df)
+```
+
+
+```{r}
+#observing feedback across all sessions 
+ggplot(feedback_df, aes(x = factor(Session), y = Count, fill = Feedback_Type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Feedback Across Sessions", x = "Session", y = "Count")
+```
+
+After assessing some of the other variables, I wanted to look more into spikes per session. I thought it would be useful to create a bar plot to see how many of those spikes that occurred per session were failures vs. successes. From the bar plot above, we can see that there is no specific pattern when it came to count of failures and successes. However, there are points that should be noted. Session 15 had the highest success count, while Session 10 had the highest failure count. Observations can be made for vice versa, where Session 17 had the lowest failure count and Session 1 had the lowest success count.
+
+```{r}
+#visualize contrast distribution for left stimulus across sessions
+ggplot(contrast_summary_table, aes(x = as.factor(Session), y = Mean_Contrast_Left)) +
+  geom_boxplot() +
+  labs(title = "Means of Left Contrast Levels Across Sessions", x = "Session", y = "Mean Contrast Left")
+
+#visualize contrast distribution for right stimulus across sessions
+ggplot(contrast_summary_table, aes(x = as.factor(Session), y = Mean_Contrast_Right)) +
+  geom_boxplot() +
+  labs(title = "Means of Right Contrast Levels Across Sessions", x = "Session", y = "Mean Contrast Right")
+```
+
+These two graphs represent the mean contrast levels of the visual stimulus, on both the left and right sides, across all sessions. After exploring all of the dataset's characteristics, I believe that there might be a strong correlation in decision-making of mice based on spikes and the contrasts. Now that we have explored the characteristics of the data and familiarized ourselves with it, we can now continue the steps that lead us to create a predictive model and see if we can predict the decisions mice make based on neural firing. 
+
+# Data Integration
+
+```{r, echo=TRUE, results='hide'}
+#cleaning, combining, and storing data in order to do pca
+
+session_summary <- list()
+
+
+for (i in 1:18) {
+  
+  
+  total_spks = sum(unlist(session[[i]]$spks), na.rm = TRUE)
+  mean_spks = mean(unlist(session[[i]]$spks), na.rm = TRUE)
+  min_spks = min(unlist(session[[i]]$spks), na.rm = TRUE)
+  max_spks = max(unlist(session[[i]]$spks), na.rm = TRUE)
+  
+  mean_contrast_left = mean(session[[i]]$contrast_left, na.rm = TRUE)
+  mean_contrast_right = mean(session[[i]]$contrast_right, na.rm = TRUE)
+
+  
+  trial_summary <- data.frame(
+    session_number = i,
+    total_spks = total_spks,
+    mean_spks = mean_spks,
+    min_spks = min_spks,
+    max_spks = max_spks,
+    mean_contrast_left = mean_contrast_left,
+    mean_contrast_right = mean_contrast_right
+  )
+  
+  
+  session_summary[[i]] = trial_summary
+}
+
+session_all <- do.call(rbind, session_summary)
+
+print(session_all)
+
+```
+
+After combining our sessions and recalling the necessary statistics, we can do principal component analysis (PCA), which reduces the dimensions of our dataset. By doing this, we are able to reduce the unnecessary parts of out data and visualize the most important parts, which will also assist us in creating our prediction model later. 
+
+```{r}
+#do pca to check principal components
+numeric_data <- session_all[, sapply(session_all, is.numeric)]
+column_variances <- apply(numeric_data, 2, var)
+zero_variance_columns <- names(column_variances[column_variances == 0])
+print(zero_variance_columns)
+
+numeric_data <- numeric_data[, column_variances != 0]
+
+scaled_data <- scale(numeric_data)
+
+pca_result <- prcomp(scaled_data, center = TRUE, scale. = TRUE)
+
+summary(pca_result)
+
+plot(pca_result, main = "Scree Plot")
+
+biplot(pca_result, main = "PCA Biplot")
+```
+
+After running PCA, we can analyze where the data varies the most, this gives a lead on what to focus on and help us identify any underlying patterns we may not have seen previously when exploring all the sessions. Now, we can further look at the distribution of the proportion of variances that each principal component is responsible for by creating a scree plot. 
+
+```{r}
+#getting the proportion of variance explained by each principal component and plotting lines for difference visualization
+explained_variance <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+
+plot(explained_variance, type = "b", 
+     main = "Scree Plot of PCA",
+     xlab = "Principal Component", 
+     ylab = "Proportion of Variance Explained",
+     pch = 19, col = "blue")
+
+cumulative_variance <- cumsum(explained_variance)
+lines(cumulative_variance, type = "b", col = "red", pch = 19)
+
+legend("topright", legend = c("Individual PC", "Cumulative Variance"), col = c("blue", "red"), pch = 19)
+```
+
+The scree plot above shows all four principal components and their corresponding proportion of variance explained. 
+
+```{r}
+#focus on two pc's
+num_components <- 2
+reduced_data <- pca_result$x[, 1:num_components]
+
+loadings <- pca_result$rotation
+print("Principal Component Loadings:")
+print(loadings)
+
+plot(reduced_data[, 1], reduced_data[, 2], col = "blue", pch = 19, 
+     xlab = "PC1", ylab = "PC2", main = "PCA: First Two Principal Components")
+```
+
+We will now focus on the first two principal components (PC1 and PC2), as identified in the previous analysis, and visualize the results. Building upon the insights and data we've gathered so far, we will proceed to develop a comprehensive prediction model that integrates all relevant information to improve performance and accuracy. 
+
+
+# Predictive Modeling
+Given that we have two possible feedback types—success or failure—we will use a logistic regression model, as it is specifically designed for binary outcomes, allowing us to effectively predict and classify these two distinct feedback types. This model will focus on spks and mean contrasts of left and right, trying to predict the feedback type outcome.
+
+## Model 1
+```{r, echo=TRUE, results='hide'}
+session_summary <- list()
+
+for (i in 1:18) {
+  
+  total_spks = sum(unlist(session[[i]]$spks), na.rm = TRUE)
+  mean_spks = mean(unlist(session[[i]]$spks), na.rm = TRUE)
+  min_spks = min(unlist(session[[i]]$spks), na.rm = TRUE)
+  max_spks = max(unlist(session[[i]]$spks), na.rm = TRUE)
+  
+  mean_contrast_left = mean(session[[i]]$contrast_left, na.rm = TRUE)
+  mean_contrast_right = mean(session[[i]]$contrast_right, na.rm = TRUE)
+  
+  #summarize feedback type
+  feedback_type = ifelse(session[[i]]$feedback_type == 1, "Success", "Failure")
+  
+  #add feedback to trial summary from earlier 
+  trial_summary <- data.frame(
+    session_number = i,
+    feedback_type = feedback_type,  
+    total_spks = total_spks,
+    mean_spks = mean_spks,
+    min_spks = min_spks,
+    max_spks = max_spks,
+    mean_contrast_left = mean_contrast_left,
+    mean_contrast_right = mean_contrast_right
+  )
+  
+  session_summary[[i]] = trial_summary
+}
+
+session_all <- do.call(rbind, session_summary)
+
+print(head(session_all))
+
+#make success = 1, failure = 0
+session_all$feedback_type <- factor(session_all$feedback_type, levels = c("Failure", "Success"))
+
+#logistic regression model predicting success or failure
+logistic_model <- glm(feedback_type ~ mean_contrast_left + mean_contrast_right + mean_spks, 
+                      data = session_all, 
+                      family = binomial)
+summary(logistic_model)
+
+#make predictions using the logistic regression model
+predictions <- predict(logistic_model, newdata = session_all, type = "response")
+predicted_class <- ifelse(predictions > 0.5, "Success", "Failure")
+
+#confusion matrix
+conf_matrix <- table(Predicted = predicted_class, Actual = session_all$feedback_type)
+
+print(conf_matrix)
+
+#calculate accuracy
+accuracy <- mean(predicted_class == session_all$feedback_type)
+cat("Accuracy of the model:", accuracy, "\n")
+```
+
+The logistic regression model was fitted with predictors including the mean contrast left, mean contrast right, and mean spikes. The model's coefficients indicate that only the intercept is statistically significant (p = 0.00169). The variables "mean contrast left," "mean contrast right," and "mean spikes" do not show strong significance, with p-values above 0.05. The model's residual deviance is 6114.4, and the AIC is 6122.4, suggesting moderate fit but potential for improvement.
+
+The model shows an overall accuracy of 71.01%, which indicates that it correctly predicts the feedback type in about 71% of cases. The confusion matrix reveals that the model has a high number of false positives and false negatives, which supports the statement previously made, that the model has room for improvement. Since there is room for improvement, I will create another model to see if I can improve the accuracy.
+
+After creating Model 1, I realized that I had not considered the importance of brain area in this project. Although I have already gone through multiple steps to observe data and create the first model, I will create a new one that also considers brain area and the spikes in each. Calculating success rate and potentially correlating it to brain area might provide me with a more accurate model.
+
+```{r}
+#calculate success rate for each session
+feedback_df <- feedback_df %>%
+  group_by(Session) %>%
+  mutate(
+    Total_Trials = sum(Count),  
+    Success_Count = Count[Feedback_Type == "Success"],  
+    Failure_Count = Count[Feedback_Type == "Failure"],  
+    Success_Rate = Success_Count / Total_Trials  
+  ) %>%
+  ungroup()
+
+brain_area_info <- unlist(lapply(session, function(x) x$brain_area[1]))  
+
+feedback_df$Brain_Area <- brain_area_info[feedback_df$Session]  
+
+print(feedback_df)
+```
+Above, we now have a table that shows session, feedback type and their counts, total trials, success count, failure count, success rate and brain area, since we can see the success rate for each session and which brain area was recorded. With this information, I can now calculate the mean success rate for each brain area across all sessions.
+
+```{r}
+#calculate the mean success rate for each brain area
+brain_area_success <- feedback_df %>%
+  group_by(Brain_Area) %>%
+  summarize(
+    Mean_Success_Rate = mean(Success_Rate, na.rm = TRUE),
+    Num_Sessions = n()  
+  )
+
+#print the mean success rates for each brain area
+print(brain_area_success)
+
+ggplot(brain_area_success, aes(x = Brain_Area, y = Mean_Success_Rate, fill = Brain_Area)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(
+    title = "Mean Success Rate by Brain Area",
+    x = "Brain Area",
+    y = "Mean Success Rate"
+  ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))  # Rotate x-axis labels for readability
+```
+
+With the table and bar plot, we are able to see which areas have the highest mean success rate, being root, CP, and VISam. 
+
+```{r}
+#perform ANOVA to test if success rates differ significantly across brain areas
+anova_result <- aov(Success_Rate ~ Brain_Area, data = feedback_df)
+summary(anova_result)
+```
+Conducting ANOVA helps see if there is a statistically significant evidence that brain area does affect success rate. Since p=<2e-16<0.05, this confirms my assumption that brain area plays a major role in success rate. From this information, I will proceed to create my second model that uses this information to hopefully create a more accurate one.
+
+
+## Model 2
+```{r}
+#create another model to see if I can get higher accuracy
+session_summary <- list()
+
+for (i in 1:18) {
+  total_spks <- sum(unlist(session[[i]]$spks), na.rm = TRUE)
+  mean_spks <- mean(unlist(session[[i]]$spks), na.rm = TRUE)
+  min_spks <- min(unlist(session[[i]]$spks), na.rm = TRUE)
+  max_spks <- max(unlist(session[[i]]$spks), na.rm = TRUE)
+  
+  mean_contrast_left <- mean(session[[i]]$contrast_left, na.rm = TRUE)
+  mean_contrast_right <- mean(session[[i]]$contrast_right, na.rm = TRUE)
+  
+  feedback_type <- ifelse(session[[i]]$feedback_type == 1, 1, 0)
+  
+  brain_area <- session[[i]]$brain_area[1]  
+  
+  
+  trial_summary <- data.frame(
+    session_number = i,
+    feedback_type = feedback_type,  
+    total_spks = total_spks,
+    mean_spks = mean_spks,
+    min_spks = min_spks,
+    max_spks = max_spks,
+    mean_contrast_left = mean_contrast_left,
+    mean_contrast_right = mean_contrast_right,
+    brain_area = brain_area  #add brain area to the summary
+  )
+  
+  
+  session_summary[[i]] <- trial_summary
+}
+
+session_all <- do.call(rbind, session_summary)
+
+
+print(head(session_all))
+
+#calculate success rate by brain area
+brain_area_success <- session_all %>%
+  group_by(brain_area) %>%
+  summarize(
+    success_rate = mean(feedback_type == 1, na.rm = TRUE)  
+  )
+
+
+session_all <- session_all %>%
+  left_join(brain_area_success, by = "brain_area")
+
+
+print(head(session_all))
+
+logistic_model2 <- glm(feedback_type ~ mean_contrast_left + mean_contrast_right + mean_spks + success_rate, 
+                      data = session_all, 
+                      family = binomial)
+
+summary(logistic_model2)
+
+library(caret)  
+
+predicted_probabilities <- predict(logistic_model, type = "response")
+
+predicted_classes <- ifelse(predicted_probabilities > 0.5, 1, 0)
+
+confusion_matrix <- table(Predicted = predicted_classes, Actual = session_all$feedback_type)
+print(confusion_matrix)
+
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+print(paste("Accuracy:", accuracy))
+```
+
+The new model reports an accuracy rate of 28.9%, which is extremely poor. Since this has a lower accuracy rate, it is best to use the first one on our testing data. 
+
+# Prediction Performance on Test Sets
+
+Here, I will import the test data and into the logistical regression model made previously, which previously showed an overall accuracy of 71.01%. 
+
+## Testing Model 1
+```{r}
+setwd("/Users/caitlynnunez/Desktop/sta141a project/test")  
+
+session = list()
+overview = data.frame(mouse_name = character(), date_exp = character())
+
+for(i in 1:2) {  
+  session[[i]] = readRDS(paste("test", i, ".rds", sep=''))  
+  
+  overview = rbind(overview, data.frame(mouse_name = session[[i]]$mouse_name, date_exp = session[[i]]$date_exp))
+}
+
+```
+The test data will be from the mice Cori and Lederberg, where the first test comes from Session 1 and the second comes from Session 18. 
+
+```{r}
+#preparing test data just incase of error
+
+setwd("/Users/caitlynnunez/Desktop/sta141a project/test")
+
+session = list()
+overview = data.frame(mouse_name = character(), date_exp = character())
+
+for(i in 1:2) {  # Loop through test1 and test2 only
+  session[[i]] = readRDS(paste("test", i, ".rds", sep=''))  
+  
+
+  overview = rbind(overview, data.frame(mouse_name = session[[i]]$mouse_name, date_exp = session[[i]]$date_exp))
+}
+
+
+print(overview)
+
+prepare_trial_data <- function(session_data) {
+  trial_data = data.frame(
+    feedback_type = unlist(lapply(session_data$feedback_type, function(x) x)),
+    contrast_left = unlist(lapply(session_data$contrast_left, function(x) x)),
+    contrast_right = unlist(lapply(session_data$contrast_right, function(x) x)),
+    time = unlist(lapply(session_data$time, function(x) x)),
+    spks = unlist(lapply(session_data$spks, function(x) x)),
+    brain_area = unlist(lapply(session_data$brain_area, function(x) x))
+  )
+  
+  return(trial_data)
+}
+
+test1_data <- prepare_trial_data(session[[1]])
+
+test2_data <- prepare_trial_data(session[[2]])
+
+test1_data$brain_area <- as.factor(test1_data$brain_area)
+test2_data$brain_area <- as.factor(test2_data$brain_area)
+
+test1_data <- cbind(test1_data, model.matrix(~ brain_area - 1, data = test1_data))
+test2_data <- cbind(test2_data, model.matrix(~ brain_area - 1, data = test2_data))
+```
+
+## Test 1 on Model
+```{r}
+setwd("/Users/caitlynnunez/Desktop/sta141a project/test")  
+
+#applying test 1 to my logistical regression model
+test1 <- readRDS("test1.rds")
+
+session_summary <- list()
+
+for (i in 1:1) {  
+  
+  total_spks = sum(unlist(test1$spks), na.rm = TRUE)
+  mean_spks = mean(unlist(test1$spks), na.rm = TRUE)
+  min_spks = min(unlist(test1$spks), na.rm = TRUE)
+  max_spks = max(unlist(test1$spks), na.rm = TRUE)
+  
+  mean_contrast_left = mean(test1$contrast_left, na.rm = TRUE)
+  mean_contrast_right = mean(test1$contrast_right, na.rm = TRUE)
+  
+  
+  feedback_type = ifelse(test1$feedback_type == 1, "Success", "Failure")
+  
+  
+  trial_summary <- data.frame(
+    session_number = i,
+    feedback_type = feedback_type,  
+    total_spks = total_spks,
+    mean_spks = mean_spks,
+    min_spks = min_spks,
+    max_spks = max_spks,
+    mean_contrast_left = mean_contrast_left,
+    mean_contrast_right = mean_contrast_right
+  )
+  
+  session_summary[[i]] = trial_summary
+}
+
+session_all <- do.call(rbind, session_summary)
+
+print(head(session_all))
+
+session_all$feedback_type <- factor(session_all$feedback_type, levels = c("Failure", "Success"))
+
+
+logistic_modeltest1 <- glm(feedback_type ~ mean_contrast_left + mean_contrast_right + mean_spks, 
+                      data = session_all, 
+                      family = binomial)
+
+summary(logistic_modeltest1)
+
+predictions_prob <- predict(logistic_modeltest1, session_all, type = "response")
+
+predictions_class <- ifelse(predictions_prob > 0.5, "Success", "Failure")
+
+confusion_matrix <- table(Predicted = predictions_class, Actual = session_all$feedback_type)
+print(confusion_matrix)
+
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+cat("Model Accuracy:", accuracy, "\n")
+```
+
+When applying the first model to the test 1 data, it reported a model accuracy of 0.28. This indicates that this is actually not an accurate model to use in order to predict decision-making. 
+
+## Test 2 with Model
+```{r, echo=TRUE, results='hide'}
+setwd("/Users/caitlynnunez/Desktop/sta141a project/test")  
+
+test2 <- readRDS("test2.rds")
+
+session_summary <- list()
+
+for (i in 1:1) {  
+  
+  total_spks = sum(unlist(test2$spks), na.rm = TRUE)
+  mean_spks = mean(unlist(test2$spks), na.rm = TRUE)
+  min_spks = min(unlist(test2$spks), na.rm = TRUE)
+  max_spks = max(unlist(test2$spks), na.rm = TRUE)
+  
+  mean_contrast_left = mean(test2$contrast_left, na.rm = TRUE)
+  mean_contrast_right = mean(test2$contrast_right, na.rm = TRUE)
+  
+  feedback_type = ifelse(test2$feedback_type == 1, "Success", "Failure")
+  
+  trial_summary <- data.frame(
+    session_number = i,
+    feedback_type = feedback_type,  
+    total_spks = total_spks,
+    mean_spks = mean_spks,
+    min_spks = min_spks,
+    max_spks = max_spks,
+    mean_contrast_left = mean_contrast_left,
+    mean_contrast_right = mean_contrast_right
+  )
+  
+  session_summary[[i]] = trial_summary
+}
+
+session_all <- do.call(rbind, session_summary)
+
+
+session_all$feedback_type <- factor(session_all$feedback_type, levels = c("Failure", "Success"))
+
+
+logistic_modeltest2 <- glm(feedback_type ~ mean_contrast_left + mean_contrast_right + mean_spks, 
+                           data = session_all, 
+                           family = binomial)
+
+summary(logistic_modeltest2)
+
+predictions_prob <- predict(logistic_modeltest2, session_all, type = "response")
+
+predictions_class <- ifelse(predictions_prob > 0.5, "Success", "Failure")
+
+confusion_matrix <- table(Predicted = predictions_class, Actual = session_all$feedback_type)
+print("Confusion Matrix:")
+print(confusion_matrix)
+
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+cat("Model Accuracy:", accuracy, "\n")
+```
+Applying it to test 2 confirmed my statement from before, the first model is not an accurate model and should not be used to predict decisions in the mice. My first model to test 2 data showed a model accuracy of 27%, which leads to a conclusion that I was not able to develop a highly accurate model.
+
+# Discussion
+
+In reflecting on the performance of my model, it is evident that there are several areas where it fell short of expectations. The results, as demonstrated by the confusion matrix and the overall model performance, indicate that the model’s predictive power was limited, with potential issues related to feature selection, data preprocessing, and model tuning or selection. This could have been a result of not fully applying the skills and knowledge I have gained from other courses, as well as from this one, in a correct manner. For example, looking at my code and data I have gathered, I could have better handled imbalanced data, which might have led to improved performance. Additionally, I could have focused more on fine-tuning the logistic regression model or explored other algorithms that might be better suited for the dataset. Overall, this experience highlights areas for growth in terms of model development, and I recognize that with further practice and a more holistic application of the skills I have acquired, I could build a more effective model in the future.
+
+# References 
+
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x
+
+ChatGPT for checking for errors and correct application
+
+Material I referenced for assistance from other STA courses I have taken such as, STA108, STA106, STA104, etc.
+
+
